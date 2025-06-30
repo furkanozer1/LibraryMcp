@@ -136,6 +136,7 @@ The application includes basic error handling:
 The application uses Spring Boot DevTools for hot reloading during development.
 
 config file for claude:
+```json
 {
   "mcpServers": {
     "booktracker": {
@@ -148,3 +149,4 @@ config file for claude:
     }
   }
 }
+```
