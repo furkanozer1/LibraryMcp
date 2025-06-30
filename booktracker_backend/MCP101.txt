@@ -1,0 +1,373 @@
+# MCP Server: The Complete Guide
+
+## Table of Contents
+1. What is an MCP Server?
+2. Why Use an MCP Server?
+3. Project Structure Deep Dive
+4. Detailed Code Walkthrough
+5. How to Implement Your Own MCP Server
+6. Testing and Deployment
+7. Best Practices
+8. Common Issues and Solutions
+
+## 1. What is an MCP Server?
+
+MCP (Model Context Protocol) Server is a standardized way for AI models to interact with your application's data and functionality. It's like a translator that allows AI systems to understand and use your application's capabilities.
+
+Key characteristics:
+- Uses JSON-RPC 2.0 protocol
+- Provides a standardized way to expose functionality
+- Enables AI models to discover and use your application's capabilities
+- Works over HTTP/HTTPS
+
+## 2. Why Use an MCP Server?
+
+1. **AI Integration**: Allows AI models to interact with your application
+2. **Standardization**: Uses well-defined protocols (JSON-RPC 2.0)
+3. **Security**: Controlled access to your application's functionality
+4. **Extensibility**: Easy to add new tools and capabilities
+5. **Separation of Concerns**: Keeps AI interaction logic separate from core business logic
+
+## 3. Project Structure Deep Dive
+
+Let's examine each component of our Book Tracker MCP Server:
+
+### 3.1 Data Layer
+- `Book.java`: Defines our data model
+- `BookRepository.java`: Handles database operations
+
+### 3.2 Service Layer
+- `BookTools.java`: Contains business logic
+
+### 3.3 API Layer
+- `McpServerController.java`: Handles MCP protocol
+
+### 3.4 Configuration
+- `application.properties`: Application configuration
+- `pom.xml`: Maven dependencies
+
+## 4. Detailed Code Walkthrough
+
+### 4.1 The Book Entity (Book.java)
+This is the blueprint for our book data. Think of it like a form that every book in our system must fill out:
+
+```java
+// Tells Spring this is a database table
+@Entity
+public class Book {
+    // Unique ID for each book (like a serial number)
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    // Book's title (e.g., "The Great Gatsby")
+    private String title;
+    
+    // Book's author (e.g., "F. Scott Fitzgerald")
+    private String author;
+    
+    // ISBN number (unique book identifier, like a barcode)
+    private String isbn;
+    
+    // Constructors (special methods to create new Book objects)
+    // Getters and setters (methods to read/update the book's information)
+}
+```
+
+**Key Points:**
+- `@Entity`: Marks this as a database table
+- `@Id`: Marks this field as the unique identifier
+- `@GeneratedValue`: Makes the ID auto-increment
+- Private fields: Store the actual book data
+
+### 4.2 The Repository (BookRepository.java)
+This is like a librarian who knows how to find and organize books in the database. You just tell it what you need, and it handles the rest:
+
+```java
+// Tells Spring this is a repository (data access layer)
+@Repository
+// Extends JpaRepository to get free CRUD operations
+public interface BookRepository extends JpaRepository<Book, Long> {
+    // Finds books by their title (e.g., all books named "1984")
+    List<Book> findByTitle(String title);
+    
+    // Finds books by author (e.g., all books by J.K. Rowling)
+    List<Book> findByAuthor(String author);
+}
+```
+
+**What's happening here?**
+- `extends JpaRepository<Book, Long>`: Gives us free methods like save(), findById(), findAll(), delete(), etc.
+- Method names like `findByTitle` are automatically implemented by Spring!
+- No need to write the actual database queries - Spring Data JPA does it for you
+
+### 4.3 The Service Layer (BookTools.java)
+This is where the actual work happens. Think of it as the library's staff who know how to perform all the book-related tasks:
+
+```java
+// Tells Spring this is a service component
+@Service
+public class BookTools {
+    // The repository (our librarian) that we'll use to access the database
+    private final BookRepository repo;
+    
+    // Constructor injection - Spring automatically provides the BookRepository
+    public BookTools(BookRepository repo) {
+        this.repo = repo;
+    }
+    
+    // Gets all books from the database
+    public Flux<Book> listAllBooks() {
+        return Mono.fromCallable(repo::findAll)  // 1. Get all books (blocking operation)
+                .flatMapMany(Flux::fromIterable)  // 2. Convert List<Book> to Flux<Book>
+                .subscribeOn(Schedulers.boundedElastic());  // 3. Run on a separate thread
+    }
+    
+    // Other methods for CRUD operations (Create, Read, Update, Delete)
+    // Each method follows a similar pattern:
+    // 1. Take some parameters (like book ID or book details)
+    // 2. Use the repository to perform the operation
+    // 3. Return the result in a reactive way (Mono or Flux)
+}
+```
+
+**Key Points:**
+- `@Service`: Marks this as a service component
+- Constructor injection: The recommended way to get dependencies
+- Reactive programming: Uses `Flux` (0..N items) and `Mono` (0..1 item) for non-blocking operations
+
+### 4.4 The REST Controller (BookStreamController.java)
+This is like the library's front desk - it handles all incoming web requests and sends responses:
+
+```java
+// Handle requests starting with "/api/books"
+@RestController
+@RequestMapping("/api/books")
+public class BookStreamController {
+    private final BookTools tools;
+    
+    // A special sink that can send updates to multiple subscribers
+    private final Sinks.Many<Book> sink = 
+        Sinks.many().multicast().onBackpressureBuffer(Queues.SMALL_BUFFER_SIZE, false);
+
+    // Constructor injection
+    public BookStreamController(BookTools tools) {
+        this.tools = tools;
+    }
+    
+    // Real-time book updates (like a live feed)
+    @GetMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<Book> stream() {
+        // Combine real updates with periodic pings to keep connection alive
+        return Flux.merge(
+            sink.asFlux(),  // Actual book updates
+            Flux.interval(Duration.ofSeconds(15))
+                .map(i -> new Book("ping", "", ""))  // Heartbeat
+        );
+    }
+    
+    // Get all books
+    @GetMapping
+    public Flux<Book> all() { 
+        return tools.listAllBooks(); 
+    }
+    
+    // Get a single book by ID
+    @GetMapping("/{id}")
+    public Flux<Book> byId(@PathVariable Long id) { 
+        return tools.getBookById(id).flux(); 
+    }
+    
+    // Create a new book
+    @PostMapping
+    public Flux<Book> create(@RequestBody Book b) {
+        return tools.createBook(b.getTitle(), b.getAuthor(), b.getIsbn())
+                .doOnNext(sink::tryEmitNext)  // Notify subscribers
+                .flux();
+    }
+    
+    // Update an existing book
+    @PutMapping("/{id}")
+    public Flux<Book> update(@PathVariable Long id, @RequestBody Book b) {
+        return tools.updateBook(id, b.getTitle(), b.getAuthor(), b.getIsbn())
+                .doOnNext(sink::tryEmitNext)  // Notify subscribers
+                .flux();
+    }
+    
+    // Delete a book
+    @DeleteMapping("/{id}")
+    public Flux<Void> delete(@PathVariable Long id) {
+        return tools.deleteBook(id)
+                .doOnTerminate(() -> 
+                    sink.tryEmitNext(new Book("deleted#" + id, "", "")))
+                .flux();
+    }
+}
+```
+
+**Key Features:**
+1. **Real-time Updates**: The `/stream` endpoint sends updates whenever books change
+2. **RESTful Endpoints**: Standard CRUD operations (GET, POST, PUT, DELETE)
+3. **Reactive Programming**: Uses Project Reactor for non-blocking operations
+4. **WebSocket-like Behavior**: Using Server-Sent Events (SSE) for real-time updates
+
+### 4.5 The MCP Controller (McpServerController.java)
+This is a special controller that lets AI systems interact with our book system using the MCP protocol:
+
+The core of our MCP server handles three main types of requests:
+
+1. **Initialize**: Handles the initial handshake
+2. **tools/list**: Lists all available tools
+3. **tools/call**: Executes a specific tool
+
+## 5. How to Implement Your Own MCP Server
+
+### 5.1 Setup Dependencies
+Add these to your `pom.xml`:
+```xml
+<dependencies>
+    <!-- Spring Boot -->
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    
+    <!-- Database -->
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+    
+    <!-- MCP Server -->
+    <dependency>
+        <groupId>org.springframework.ai</groupId>
+        <artifactId>spring-ai-mcp-server-spring-boot-starter</artifactId>
+    </dependency>
+</dependencies>
+```
+
+### 5.2 Create Your Entity
+```java
+@Entity
+public class YourEntity {
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    private String name;
+    // other fields, getters, setters
+}
+```
+
+### 5.3 Create Repository
+```java
+@Repository
+public interface YourRepository extends JpaRepository<YourEntity, Long> {
+    // Custom query methods
+}
+```
+
+### 5.4 Create Service Layer
+```java
+@Service
+public class YourService {
+    private final YourRepository repo;
+    
+    public YourService(YourRepository repo) {
+        this.repo = repo;
+    }
+    
+    // Your business logic methods
+}
+```
+
+### 5.5 Implement MCP Controller
+```java
+@RestController
+public class YourMcpController {
+    private final YourService service;
+    private final ObjectMapper om = new ObjectMapper();
+    
+    @PostMapping("/mcp")
+    public Mono<Map<String, Object>> handleRequest(@RequestBody Map<String, Object> request) {
+        String method = (String) request.get("method");
+        Object id = request.get("id");
+        
+        return switch (method) {
+            case "initialize" -> handleInitialize(id);
+            case "tools/list" -> handleToolsList(id);
+            case "tools/call" -> handleToolsCall(id, (Map<String, Object>) request.get("params"));
+            default -> Mono.just(createError(id, -32601, "Method not found"));
+        };
+    }
+    
+    // Implement handlers...
+}
+```
+
+## 6. Testing and Deployment
+
+### 6.1 Testing
+1. Use Postman or curl to test endpoints
+2. Example test for listing books:
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "getAllBooks"
+    }
+  }'
+```
+
+### 6.2 Deployment
+1. Build the project:
+```bash
+./mvnw clean package
+```
+
+2. Run the application:
+```bash
+java -jar target/your-application.jar
+```
+
+## 7. Best Practices
+
+1. **Error Handling**: Always include proper error handling
+2. **Validation**: Validate all inputs
+3. **Documentation**: Document your API and tools
+4. **Security**: Implement proper authentication and authorization
+5. **Logging**: Add comprehensive logging
+6. **Testing**: Write unit and integration tests
+
+## 8. Common Issues and Solutions
+
+1. **JSON-RPC Errors**:
+   - Code -32600: Invalid Request
+   - Code -32601: Method not found
+   - Code -32602: Invalid params
+   - Code -32603: Internal error
+
+2. **Database Connection Issues**:
+   - Check database URL in application.properties
+   - Verify database credentials
+   - Ensure database server is running
+
+3. **MCP Protocol Issues**:
+   - Ensure all required fields are present in requests
+   - Verify JSON formatting
+   - Check method names and parameters
+
+## Conclusion
+
+This guide has walked you through creating an MCP server from scratch. The principles demonstrated in this book tracker application can be applied to any domain. The key is to:
+
+1. Define your data model
+2. Create repositories for data access
+3. Implement business logic in services
+4. Expose functionality through MCP endpoints
+5. Test thoroughly
+6. Deploy and monitor
+
+By following these steps, you can enable AI models to interact with your application in a standardized, secure way.
