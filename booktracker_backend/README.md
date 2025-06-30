@@ -134,3 +134,17 @@ The application includes basic error handling:
 ## Development
 
 The application uses Spring Boot DevTools for hot reloading during development.
+
+config file for claude:
+{
+  "mcpServers": {
+    "booktracker": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "http://127.0.0.1:8080/mcp"
+      ]
+    }
+  }
+}
