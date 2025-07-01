@@ -150,3 +150,6 @@ config file for claude:
   }
 }
 ```
+
+# Important Notice
+_All related files and detailed information about MCP and MCP servers can be found under `booktracker_backend` directory._
